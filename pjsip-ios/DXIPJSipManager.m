@@ -4,8 +4,8 @@
 //
 //  Created by Otavio Zabaleta on 14/05/2014.
 //  Copyright (c) 2014 Otavio Zabaleta. All rights reserved.
-//
 
+//  Modified by Victor Casé on 29/04/2016
 
 #import "DXIPJSipManager.h"
 
@@ -73,12 +73,10 @@ static pjsua_call_id call_id;
         self.isInited = NO;
         self.isAddedAccount = NO;
         self.isLogged = NO;
-        self.contactCentreNumber = @"3851000";
-        self.agentNumber = @"501406";
-        self.agentPasscode = @"501406";
-        self.sipHost = @"sip.easycontactnow.com";
-        self.sipUsername = @"dxi";
-        self.sipPasscode = @"dxi";
+        self.agentNumber = @"{destination username}";
+        self.sipHost = @"{sip host proxy}";
+        self.sipUsername = @"{username}";
+        self.sipPasscode = @"{password}";
         
     }
     return self;
@@ -106,7 +104,7 @@ static pjsua_call_id call_id;
     }
     
     /* If URL is a valid SIP URL */
-    char *sipUrl = [self cStringFromNSString:[NSString stringWithFormat:@"sip:%@@%@", self.contactCentreNumber, self.sipHost]];
+    char *sipUrl = [self cStringFromNSString:[NSString stringWithFormat:@"sip:%@@%@", self.sipUsername, self.sipHost]];
     status = pjsua_verify_url(sipUrl);
     if (status != PJ_SUCCESS) {
         NSLog(@"%s - %d @status = pjsua_verify_url(%s)\nstatus = %d", __PRETTY_FUNCTION__, __LINE__, sipUrl, status);
@@ -174,7 +172,7 @@ static pjsua_call_id call_id;
         self.isRegistered = YES;
         self.isAddedAccount = YES;
         self.sipState = kSIP_STATE_REGISTERED;
-        [self callContactCenter];
+        [self.delegate didRegisterToSipServerWithSuccess];
     }
 }
 
@@ -183,23 +181,19 @@ static pjsua_call_id call_id;
 }
 
 - (void)callContactCenter {
-    self.sipState = kSIP_STATE_CALLING_COTACT_CENTRE;
+    self.sipState = kSIP_STATE_CALLING_CONTACT_CENTER;
     NSString *agentNumber = [NSString stringWithString:self.agentNumber];
     while(agentNumber.length < 6) {
         agentNumber = [NSString stringWithFormat:@"0%@", agentNumber];
     }
-    NSString *agentPassword = [NSString stringWithString:self.agentPasscode];
-    while(agentPassword.length < 6) {
-        agentPassword = [NSString stringWithFormat:@"0%@", agentPassword];
-    }
-   
-    char *sipUrl = [self cStringFromNSString:[NSString stringWithFormat:@"sip:485%@%@@%@", self.agentNumber, self.agentPasscode, self.sipHost]];
+    
+    char *sipUrl = [self cStringFromNSString:[NSString stringWithFormat:@"sip:%@@%@", self.agentNumber, self.sipHost]];
     /* Make call to the URL. */
     pj_str_t uri = pj_str(sipUrl);
     status = pjsua_call_make_call(acc_id, &uri, 0, NULL, NULL, NULL);
     if (status != PJ_SUCCESS) {
         NSLog(@"%s - %d @pjsua_call_make_call(acc_id, &[%s], 0, NULL, NULL, NULL)\nstatus = %d", __PRETTY_FUNCTION__, __LINE__, sipUrl, status);
-        [self failWithMessage:[NSString stringWithFormat:@"Error calling contact centre: %d", status]];
+        [self failWithMessage:[NSString stringWithFormat:@"Error calling contact center: %d", status]];
         return;
     }
     
@@ -207,6 +201,29 @@ static pjsua_call_id call_id;
     self.isLogged = YES;
     
     [self.delegate onRegisterToSipServerAndLogAgentDidFinish];
+}
+
+-(void)acceptIncommingCall{
+    
+    status = pjsua_call_get_info(call_id, &call_info);
+    
+    if(status != PJ_SUCCESS) {
+        NSLog(@"%s - %d\nstatus = %d", __PRETTY_FUNCTION__, __LINE__, status);
+    }
+    
+    status = pjsua_call_answer(call_id, 200, NULL, NULL);
+    if(status != PJ_SUCCESS) {
+        NSLog(@"%s - %d\nstatus = %d", __PRETTY_FUNCTION__, __LINE__, status);
+    }
+}
+
+- (void)rejectIncommingCall{
+    
+    status = pjsua_call_answer(call_id, PJSIP_SC_DECLINE, NULL, NULL);
+    if(status != PJ_SUCCESS) {
+        NSLog(@"%s - %d\nstatus = %d", __PRETTY_FUNCTION__, __LINE__, status);
+    }
+    
 }
 
 - (void)enableSound {
@@ -314,11 +331,7 @@ static pjsua_call_id call_id;
     
     //PJ_LOG(3,(FILE, "Incoming call from %.*s!!", (int)call_info.remote_info.slen, call_info.remote_info.ptr));
     
-    /* Automatically answer incoming calls with 200/OK */
-    status = pjsua_call_answer(call_id, 200, NULL, NULL);
-    if(status != PJ_SUCCESS) {
-        NSLog(@"%s - %d\nstatus = %d", __PRETTY_FUNCTION__, __LINE__, status);
-    }
+    [self.delegate didReceivedIncommingCall];
 }
 
 /* Obj-C method that implements logic for on_incoming_call() callback */
@@ -330,6 +343,31 @@ static pjsua_call_id call_id;
     status = pjsua_call_get_info(call_id, &call_info);
     if(status != PJ_SUCCESS) {
         NSLog(@"%s - %d\nstatus = %d", __PRETTY_FUNCTION__, __LINE__, status);
+    }
+    
+    if(call_info.state == PJSIP_INV_STATE_CALLING){
+        [self.delegate callWasStillCalling];
+    }
+    
+    if(call_info.state == PJSIP_INV_STATE_CONFIRMED){
+        [self.delegate callWasEstabilished];
+    }
+    
+    if(call_info.state == PJSIP_INV_STATE_DISCONNECTED){
+        if (call_info.last_status == PJSIP_SC_NOT_FOUND || call_info.last_status == PJSIP_SC_BAD_EXTENSION) {
+            [self.delegate callWasDisconnectedUnregisteredPeer];
+        }else if (call_info.last_status == PJSIP_SC_TEMPORARILY_UNAVAILABLE){
+            [self.delegate callWasDisconnectedPeerTemporarilyUnavailable];
+            if(call_info.connect_duration.sec == 0){
+                [self.delegate callWillTryAgain];
+            }
+        }else if (call_info.last_status == PJSIP_SC_BAD_GATEWAY){
+            [self.delegate callWasDisconnectedBadGateway];
+        }else if (call_info.last_status == PJSIP_SC_BUSY_HERE){
+            [self.delegate callWasDisconnectedPeerBusy];
+        }else{
+            [self.delegate callWasDisconnected];
+        }
     }
     
     //PJ_LOG(3,(FILE, "Call %d state=%.*s", call_id, (int)call_info.state_text.slen, call_info.state_text.ptr));
@@ -367,10 +405,6 @@ static pjsua_call_id call_id;
     if(acc_info.status != PJSIP_SC_OK && acc_info.status != PJSIP_SC_ACCEPTED) {
         // TODO: handle status
         return;
-    }
-    
-    if(self.sipState == kSIP_STATE_REGISTERED) {
-        //[self callContactCenter];
     }
 }
 
